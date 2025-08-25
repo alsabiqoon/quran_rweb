@@ -1,0 +1,6 @@
+
+Get-ChildItem *.mp3 | ForEach-Object {
+>>     $in = $_.FullName
+>>     $out = "compressed\$($_.Name)"
+>>     ffmpeg -i "$in" -b:a 48k "$out"
+>> }
