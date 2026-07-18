@@ -1,0 +1,98 @@
+{
+    "competitions": [
+      {
+        "id": "dubai",
+        "name": "مسابقة دبي الدولية للقرآن الكريم",
+        "country": "الإمارات",
+        "yearLabel": "2024",
+        "available": true,
+        "episodesFile": "assets/youtube_competitions/dubai/episodes.json",
+        "years": [
+          {
+            "id": "2024",
+            "label": "2024",
+            "episodesFile": "assets/youtube_competitions/dubai/episodes.json"
+          }
+        ]
+      },
+      {
+        "id": "makkah",
+        "name": "مسابقة الملك عبدالعزيز الدولية للقرآن الكريم",
+        "country": "السعودية",
+        "yearLabel": "2025",
+        "available": true,
+        "episodesFile": "assets/youtube_competitions/makkah/episodes.json",
+        "years": [
+          {
+            "id": "2025",
+            "label": "2025",
+            "episodesFile": "assets/youtube_competitions/makkah/episodes.json"
+          }
+        ]
+      },
+      {
+        "id": "iraq",
+        "name": "مسابقة العراق للقرآن الكريم",
+        "country": "العراق",
+        "yearLabel": "قريباً",
+        "available": false,
+        "episodesFile": "assets/youtube_competitions/iraq/episodes.json"
+      },
+      {
+        "id": "kuwait",
+        "name": "مسابقة الكويت الدولية للقرآن الكريم",
+        "country": "الكويت",
+        "yearLabel": "قريباً",
+        "available": false,
+        "episodesFile": ""
+      },
+      {
+        "id": "egypt",
+        "name": "مسابقة مصر الدولية للقرآن الكريم",
+        "country": "مصر",
+        "yearLabel": "قريباً",
+        "available": false,
+        "episodesFile": ""
+      },
+      {
+        "id": "malaysia",
+        "name": "مسابقة ماليزيا الدولية للقرآن الكريم",
+        "country": "ماليزيا",
+        "yearLabel": "قريباً",
+        "available": false,
+        "episodesFile": ""
+      },
+      {
+        "id": "morocco",
+        "name": "مسابقة المغرب الدولية للقرآن الكريم",
+        "country": "المغرب",
+        "yearLabel": "قريباً",
+        "available": false,
+        "episodesFile": ""
+      },
+      {
+        "id": "algeria",
+        "name": "مسابقة الجزائر الدولية للقرآن الكريم",
+        "country": "الجزائر",
+        "yearLabel": "قريباً",
+        "available": false,
+        "episodesFile": ""
+      },
+      {
+        "id": "qatar",
+        "name": "مسابقة الشيخ جاسم للقرآن الكريم",
+        "country": "قطر",
+        "yearLabel": "قريباً",
+        "available": false,
+        "episodesFile": ""
+      },
+      {
+        "id": "jordan",
+        "name": "المسابقة الهاشمية الدولية للقرآن الكريم",
+        "country": "الأردن",
+        "yearLabel": "قريباً",
+        "available": false,
+        "episodesFile": ""
+      }
+    ]
+  }

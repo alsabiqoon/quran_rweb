@@ -12,10 +12,13 @@ dependencies:
   flutter:
     sdk: flutter
   audioplayers: ^6.5.0
+  just_audio: ^0.10.6
   cupertino_icons: ^1.0.8
   flutter_spinbox: ^0.13.1
   google_fonts: ^6.2.1
   dio: ^5.4.3+1
+  url_launcher: ^6.3.1
+  youtube_player_iframe: ^5.2.1
 
 dev_dependencies:
   flutter_test:
@@ -40,10 +43,15 @@ flutter:
     - assets/begin/
     - assets/begin/001000.mp3
     - assets/begin/001001.mp3
-    # - assets/icon.png
-    # - assets/quran_mp3/
+    - assets/youtube_competitions/competitions_index.json
+    - assets/youtube_competitions/dubai/
+    - assets/youtube_competitions/iraq/
+    - assets/youtube_competitions/makkah/
 
   fonts:
     - family: uthmani
       fonts:
         - asset: assets/fonts/KFGQPCAnBold.ttf
+    - family: amiriQuran
+      fonts:
+        - asset: assets/fonts/AmiriQuran-Regular.ttf

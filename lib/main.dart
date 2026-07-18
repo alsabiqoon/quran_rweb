@@ -6,7 +6,8 @@ import 'dart:math';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show rootBundle;
+// import 'package:flutter/services.dart' show rootBundle;
+import 'package:flutter/services.dart' show rootBundle, AssetManifest;
 
 import 'web_audio_controller_stub.dart'
     if (dart.library.html) 'web_audio_controller.dart' as webaudio;
@@ -177,9 +178,22 @@ class PlayPage extends StatefulWidget {
   final int delaySeconds; // minutes
   final List<String> selectedSurahs;
 
+  // Test filter mode from SettingsPage
+  final String testMode; // surah, page, juz, hizb, rub
+  final int selectedPageFrom;
+  final int selectedPageTo;
+  final int selectedJuzFrom;
+  final int selectedJuzTo;
+  final int selectedHizbFrom;
+  final int selectedHizbTo;
+  final int selectedRubFrom;
+  final int selectedRubTo;
+
   // Passed from SettingsPage
   final String reciterKey;
   final String reciterUrl;
+  final String reciterNameAr;
+  final String reciterNameEn;
 
   const PlayPage({
     Key? key,
@@ -187,8 +201,19 @@ class PlayPage extends StatefulWidget {
     required this.ayahsAfter,
     required this.delaySeconds,
     required this.selectedSurahs,
+    required this.testMode,
+    required this.selectedPageFrom,
+    required this.selectedPageTo,
+    required this.selectedJuzFrom,
+    required this.selectedJuzTo,
+    required this.selectedHizbFrom,
+    required this.selectedHizbTo,
+    required this.selectedRubFrom,
+    required this.selectedRubTo,
     required this.reciterKey,
     required this.reciterUrl,
+    required this.reciterNameAr,
+    required this.reciterNameEn,
   }) : super(key: key);
 
   @override
@@ -207,6 +232,8 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
   String t(String k) => L10nSimple.t(_lang, k);
 
   final AudioPlayer _player = AudioPlayer();
+  final ScrollController _ayahScrollController = ScrollController();
+  String? _lastScrolledAyahKey;
 
   // Quran files (filtered)
   List<String> _files = [];
@@ -216,11 +243,13 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
 
   int _currentIndex = 0;
   int _countdown = 0;
+  static const int _answerReviewSeconds = 4;
   bool _playing = false;
   bool _stopRequested = false;
 
   bool _canPressAnswer = false;
   bool _answerPlayed = false;
+  bool _showAyahInfo = false;
   int _currentMainNumber = 0;
   bool _answeredManually = false;
   Completer<void>? _waitForAnswer;
@@ -265,6 +294,9 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
   // play ta'awwudh once (assets/begin/001000 & 001001)
   bool _taawudhPlayed = false;
 
+  // Start the first question immediately after entering the quiz page.
+  bool _quizStarted = true;
+
   // Animated bar under the Answer card
   late final AnimationController _answerBarController;
 
@@ -272,6 +304,8 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
   void initState() {
     super.initState();
     AudioService.I.setReciter(widget.reciterUrl);
+    _player.setReleaseMode(ReleaseMode.stop);
+    _player.setPlayerMode(PlayerMode.mediaPlayer);
 
     _answerBarController = AnimationController(
       vsync: this,
@@ -280,7 +314,14 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
       upperBound: 1.0,
     );
 
-    _loadFileList();
+    _loadFileList().then((_) {
+      if (!mounted || _files.isEmpty) return;
+      Future.microtask(() {
+        if (mounted && !_playing) {
+          _startQuestions();
+        }
+      });
+    });
   }
 
   @override
@@ -289,6 +330,7 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
     try {
       _answerBarController.dispose();
     } catch (_) {}
+    _ayahScrollController.dispose();
     super.dispose();
   }
 
@@ -333,10 +375,28 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
       await _player.release();
     } catch (_) {}
     try {
+      await webaudio.WebAudioController.stop();
+    } catch (_) {}
+    try {
       await AudioService.I.stop();
     } catch (_) {}
 
     _isPlayingAyah = false;
+  }
+
+  Future<void> _stopCurrentAudioNow() async {
+    try {
+      await webaudio.WebAudioController.stop();
+    } catch (_) {}
+    try {
+      await _player.stop();
+    } catch (_) {}
+    try {
+      await webaudio.WebAudioController.stop();
+    } catch (_) {}
+    try {
+      await AudioService.I.stop();
+    } catch (_) {}
   }
 
   // =============== HARD STOP HELPERS =================
@@ -370,6 +430,9 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
       await _player.release();
     } catch (_) {}
     try {
+      await webaudio.WebAudioController.stop();
+    } catch (_) {}
+    try {
       await AudioService.I.stop();
     } catch (_) {}
 
@@ -391,6 +454,7 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
       _phase = RoundPhase.idle;
       _canPressAnswer = false;
       _answerPlayed = false;
+      _showAyahInfo = false;
       _questionAyah = null;
       _currentAnswerAyah = null;
       _countdown = 0;
@@ -405,13 +469,17 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
     }
   }
 
-  Future<void> _loadFileList() async {
-    final manifestStr = await rootBundle.loadString('AssetManifest.json');
-    final Map<String, dynamic> manifest =
-        json.decode(manifestStr) as Map<String, dynamic>;
+  
 
-    // We only use assets for start/hasbuk (local)
-    final allMp3 = manifest.keys.where((k) => k.endsWith('.mp3')).toList();
+  Future<void> _loadFileList() async {
+    final manifest = await AssetManifest.loadFromAssetBundle(rootBundle);
+
+    // We only use assets for start/hasbuk (local).
+    // Do NOT read AssetManifest.bin.json manually; in newer Flutter it is encoded.
+    final allMp3 = manifest
+        .listAssets()
+        .where((k) => k.endsWith('.mp3'))
+        .toList();
 
     final jsonString = await rootBundle.loadString('assets/ayah_texts.json');
     _ayahJson = json.decode(jsonString) as Map<String, dynamic>;
@@ -439,8 +507,32 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
           .toString()
           .trim();
 
-      final include =
-          selectAll || selected.contains(surahAr) || selected.contains(surahEn);
+      bool include = false;
+
+      if (widget.testMode == 'surah') {
+        include =
+            selectAll || selected.contains(surahAr) || selected.contains(surahEn);
+      } else if (widget.testMode == 'page') {
+        final page = int.tryParse('${info['page']}');
+        include = page != null &&
+            page >= widget.selectedPageFrom &&
+            page <= widget.selectedPageTo;
+      } else if (widget.testMode == 'juz') {
+        final juz = int.tryParse('${info['juz']}');
+        include = juz != null &&
+            juz >= widget.selectedJuzFrom &&
+            juz <= widget.selectedJuzTo;
+      } else if (widget.testMode == 'hizb') {
+        final hizb = int.tryParse('${info['hizb']}');
+        include = hizb != null &&
+            hizb >= widget.selectedHizbFrom &&
+            hizb <= widget.selectedHizbTo;
+      } else if (widget.testMode == 'rub') {
+        final rub = int.tryParse('${info['rub']}');
+        include = rub != null &&
+            rub >= widget.selectedRubFrom &&
+            rub <= widget.selectedRubTo;
+      }
 
       if (include) {
         _files.add(fileKey);
@@ -475,7 +567,20 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
     }
 
     setState(() {});
+  }
+
+  void _beginQuizFromUserTap() {
+    if (_quizStarted || _files.isEmpty) return;
+    _unlockIfWeb();
+    setState(() {
+      _quizStarted = true;
+    });
     _startQuestions();
+  }
+
+  String _webAssetUrl(String assetKey) {
+    final key = assetKey.startsWith('assets/') ? assetKey : 'assets/$assetKey';
+    return Uri.base.resolve('assets/$key').toString();
   }
 
   void _reshuffleQueue(List<String> src, List<String> dst, {String? avoid}) {
@@ -512,14 +617,25 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
   /// taʿawwudh once from assets
   Future<void> _playTaawudhOnce(int rid) async {
     if (_taawudhPlayed) return;
-    Future<void> _try(String path) async {
-      try {
-        await _playAssetG(path, rid);
-      } catch (_) {}
-    }
+    if (_stopRequested || rid != _roundId) return;
 
-    await _try('assets/begin/001000.mp3');
-    await _try('assets/begin/001001.mp3');
+    // iPhone Safari sometimes does not fire the ended event for very short files.
+    // Forced durations prevent the round from freezing after ta'awwudh.
+    await _playAssetG(
+      'assets/begin/001000.mp3',
+      rid,
+      forcedDuration: const Duration(seconds: 4),
+    );
+
+    await Future.delayed(const Duration(milliseconds: 350));
+    if (_stopRequested || rid != _roundId) return;
+
+    await _playAssetG(
+      'assets/begin/001001.mp3',
+      rid,
+      forcedDuration: const Duration(seconds: 5),
+    );
+
     _taawudhPlayed = true;
   }
 
@@ -530,18 +646,60 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
     }
   }
 
-  Future<void> _playAssetG(String path, int rid) async {
+  Future<void> _playAssetG(
+    String path,
+    int rid, {
+    Duration? forcedDuration,
+  }) async {
     if (_stopRequested || rid != _roundId) return;
     await _checkPause();
     if (!mounted || rid != _roundId) return;
+
     setState(() => _isPlayingAyah = true);
 
-    await _player.stop();
-    await _player.play(AssetSource(path.replaceFirst('assets/', '')));
-    await _player.onPlayerComplete.first;
+    try {
+      _unlockIfWeb();
 
-    if (!mounted || rid != _roundId) return;
-    setState(() => _isPlayingAyah = false);
+      if (kIsWeb) {
+        await webaudio.WebAudioController.playUrlAndWait(
+          _webAssetUrl(path),
+          timeout: forcedDuration ?? const Duration(seconds: 25),
+          forceFinishAfter: forcedDuration,
+        );
+      } else {
+        final c = Completer<void>();
+        late final StreamSubscription<void> sub;
+
+        await _player.stop();
+        await Future.delayed(const Duration(milliseconds: 150));
+
+        sub = _player.onPlayerComplete.listen((_) {
+          if (!c.isCompleted) c.complete();
+        });
+
+        await _player.setReleaseMode(ReleaseMode.stop);
+        await _player.setSource(AssetSource(path.replaceFirst('assets/', '')));
+        await Future.delayed(const Duration(milliseconds: 200));
+        await _player.resume();
+
+        if (forcedDuration != null) {
+          await Future.any([c.future, Future.delayed(forcedDuration)]);
+        } else {
+          await c.future.timeout(const Duration(seconds: 25), onTimeout: () {});
+        }
+        try { await sub.cancel(); } catch (_) {}
+      }
+    } catch (_) {
+      // Never freeze the quiz because of a short local prompt audio.
+    } finally {
+      try {
+        if (!kIsWeb) await _player.stop();
+      } catch (_) {}
+
+      if (mounted && rid == _roundId) {
+        setState(() => _isPlayingAyah = false);
+      }
+    }
   }
 
   // Build a full URL from reciter base + file name (ensures single '/')
@@ -551,42 +709,96 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
   }
 
   /// Plays an ayah online.
-  ///   1) AudioService (primary).
-  ///   2) Fallback to audioplayers UrlSource.
+  /// On iPhone Safari web, skip AudioService and use one HTML audio element.
   Future<void> _playAyahOnline(String assetLikePathOrFileName, int rid) async {
     if (_stopRequested || rid != _roundId) return;
     await _checkPause();
     if (!mounted || rid != _roundId) return;
+
     setState(() => _isPlayingAyah = true);
 
     final fileName = assetLikePathOrFileName.split('/').last;
+    final url = _buildReciterUrl(widget.reciterUrl, fileName);
 
     try {
       _unlockIfWeb();
-      await AudioService.I.playAndWait(fileName);
-    } catch (_) {
-      final url = _buildReciterUrl(widget.reciterUrl, fileName);
-      try {
-        await _player.stop();
-        await _player.play(UrlSource(url));
-        await _player.onPlayerComplete.first;
-      } catch (_) {}
-    }
 
-    if (!mounted || rid != _roundId) return;
-    setState(() => _isPlayingAyah = false);
+      if (kIsWeb) {
+        await webaudio.WebAudioController.playUrlAndWait(
+          url,
+          timeout: const Duration(seconds: 120),
+        );
+      } else {
+        await AudioService.I.playAndWait(fileName);
+      }
+    } catch (_) {
+      try {
+        if (kIsWeb) {
+          await webaudio.WebAudioController.playUrlAndWait(
+            url,
+            timeout: const Duration(seconds: 120),
+          );
+        } else {
+          final c = Completer<void>();
+          late final StreamSubscription<void> sub;
+          await _player.stop();
+          sub = _player.onPlayerComplete.listen((_) {
+            if (!c.isCompleted) c.complete();
+          });
+          await _player.setSource(UrlSource(url));
+          await Future.delayed(const Duration(milliseconds: 200));
+          await _player.resume();
+          await c.future.timeout(const Duration(seconds: 120), onTimeout: () {});
+          try { await sub.cancel(); } catch (_) {}
+        }
+      } catch (_) {}
+    } finally {
+      if (mounted && rid == _roundId) {
+        setState(() => _isPlayingAyah = false);
+      }
+    }
   }
 
   Future<void> _startCountdown() async {
-    int totalSeconds = widget.delaySeconds * 60;
+    final int totalSeconds = max(1, widget.delaySeconds * 60);
     if (!mounted) return;
     setState(() => _countdown = totalSeconds);
-    for (int i = totalSeconds; i > 0; i--) {
-      if (_stopRequested || _answeredManually || _answerPlayed || _skipped) return;
+
+    for (int remaining = totalSeconds; remaining > 0; remaining--) {
+      if (_stopRequested || _answeredManually || _answerPlayed || _skipped) {
+        if (mounted) setState(() => _countdown = 0);
+        return;
+      }
+
       await _checkPause();
       await Future.delayed(const Duration(seconds: 1));
+
       if (!mounted) return;
-      setState(() => _countdown--);
+      if (_stopRequested || _answeredManually || _answerPlayed || _skipped) {
+        setState(() => _countdown = 0);
+        return;
+      }
+
+      setState(() => _countdown = remaining - 1);
+    }
+  }
+
+  Future<void> _answerReviewDelay(int rid) async {
+    if (!mounted || rid != _roundId) return;
+
+    setState(() => _countdown = _answerReviewSeconds);
+
+    for (int remaining = _answerReviewSeconds; remaining > 0; remaining--) {
+      if (_stopRequested || _skipped || rid != _roundId) {
+        if (mounted) setState(() => _countdown = 0);
+        return;
+      }
+
+      await _checkPause();
+      await Future.delayed(const Duration(seconds: 1));
+
+      if (!mounted || _stopRequested || _skipped || rid != _roundId) return;
+      setState(() => _countdown = remaining - 1);
     }
   }
 
@@ -602,6 +814,7 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
       _autoSkippedCount = 0;
       _skippedManuallyCount = 0;
       _phase = RoundPhase.idle;
+      _showAyahInfo = false;
       _roundSummary.clear();
     });
 
@@ -622,6 +835,7 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
       setState(() {
         _currentIndex = i + 1;
         _answerPlayed = false;
+        _showAyahInfo = false;
         _canPressAnswer = false;
         _questionAyah = null;
         _currentAnswerAyah = null;
@@ -711,11 +925,52 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
     _showFinishDialog();
   }
 
-  void _togglePause() {
-    setState(() => _paused = !_paused);
-    if (!_paused && _pauseCompleter != null && !_pauseCompleter!.isCompleted) {
-      _pauseCompleter!.complete();
+  Future<void> _togglePause() async {
+    if (_paused) {
+      // Resume from the same audio position. Do not restart the ayah.
+      try {
+        if (kIsWeb) {
+          await webaudio.WebAudioController.resume();
+        } else {
+          await _player.resume();
+          await AudioService.I.resume();
+        }
+      } catch (_) {}
+
+      if (!mounted) return;
+      setState(() => _paused = false);
+
+      if (_pauseCompleter != null && !_pauseCompleter!.isCompleted) {
+        _pauseCompleter!.complete();
+      }
+
+      try {
+        if (_answerPlayed && !_answerBarController.isAnimating) {
+          _answerBarController.repeat();
+        }
+      } catch (_) {}
+      return;
     }
+
+    // Pause only. Do not stop, complete, or reset the active audio.
+    // Stopping here makes the current ayah finish logically and corrupts the next question.
+    if (!mounted) return;
+    setState(() => _paused = true);
+
+    try {
+      if (_answerBarController.isAnimating) {
+        _answerBarController.stop();
+      }
+    } catch (_) {}
+
+    try {
+      if (kIsWeb) {
+        await webaudio.WebAudioController.pause();
+      } else {
+        await _player.pause();
+        await AudioService.I.pause();
+      }
+    } catch (_) {}
   }
 
   void _skipToNextRound() async {
@@ -724,14 +979,23 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
 
     _jumping = true;
     _hasbukTimer?.cancel();
-    _skipped = true;
-    _skippedManuallyCount++;
+
+    // If the user already displayed the answer, pressing Next is normal navigation,
+    // not a skipped question.
+    final bool wasAnswered = _answerPlayed || _answeredManually;
+    if (!wasAnswered) {
+      _skipped = true;
+      _skippedManuallyCount++;
+    }
 
     try {
       await _player.stop();
     } catch (_) {}
     try {
       await _player.release();
+    } catch (_) {}
+    try {
+      await webaudio.WebAudioController.stop();
     } catch (_) {}
     try {
       await AudioService.I.stop();
@@ -748,6 +1012,7 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
       _countdown = 0;
       _canPressAnswer = false;
       _answerPlayed = false;
+      _showAyahInfo = false;
       _questionAyah = null;
       _currentAnswerAyah = null;
       _phase = RoundPhase.idle;
@@ -761,7 +1026,7 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
     final manualAnswers = _answeredManuallyCount;
     final autoHasbuk = _autoSkippedCount;
     final skipped = _skippedManuallyCount;
-    final unanswered = total - manualAnswers - autoHasbuk - skipped;
+    final unanswered = max(0, total - manualAnswers - autoHasbuk - skipped);
 
     final now = DateTime.now();
     if (_roundStart != null) {
@@ -807,7 +1072,7 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Text(
-                  _lang == 'ar' ? "✅ انتهت المسابقة" : "✅ Round finished",
+                  _lang == 'ar' ? "🎉 أحسنت" : "🎉 Well done",
                   textAlign: TextAlign.center,
                   style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
                 ),
@@ -824,20 +1089,17 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
                     ),
                     child: ConstrainedBox(
                       constraints: const BoxConstraints(maxHeight: 260),
-                      child: Scrollbar(
-                        thumbVisibility: true,
-                        child: SingleChildScrollView(
-                          primary: false,
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              for (final s in items)
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(vertical: 3.0),
-                                  child: Text(s, style: const TextStyle(fontSize: 15)),
-                                ),
-                            ],
-                          ),
+                      child: SingleChildScrollView(
+                        primary: false,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            for (final s in items)
+                              Padding(
+                                padding: const EdgeInsets.symmetric(vertical: 3.0),
+                                child: Text(s, style: const TextStyle(fontSize: 15)),
+                              ),
+                          ],
                         ),
                       ),
                     ),
@@ -920,6 +1182,7 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
                 _stopRequested = false;
                 _playing = false;
                 _answerPlayed = false;
+                _showAyahInfo = false;
                 _taawudhPlayed = false;
                 _roundStart = DateTime.now();
                 _startQuestions();
@@ -945,6 +1208,9 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
       await _player.release();
     } catch (_) {}
     try {
+      await webaudio.WebAudioController.stop();
+    } catch (_) {}
+    try {
       await AudioService.I.stop();
     } catch (_) {}
 
@@ -957,6 +1223,7 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
       _countdown = 0;
       _canPressAnswer = false;
       _answerPlayed = true;
+      _showAyahInfo = true;
       _phase = RoundPhase.answer;
     });
 
@@ -1017,8 +1284,22 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
       }
     } catch (_) {}
 
-    if (_waitForAnswer != null && !_waitForAnswer!.isCompleted) {
-      _waitForAnswer!.complete();
+    // Keep the answer visible briefly, show a countdown, then move automatically.
+    // This prevents the screen from looking frozen after "عرض الإجابة".
+    if (mounted && rid == _roundId) {
+      setState(() {
+        _phase = RoundPhase.answer;
+        _canPressAnswer = false;
+      });
+
+      await _answerReviewDelay(rid);
+
+      if (mounted &&
+          rid == _roundId &&
+          _waitForAnswer != null &&
+          !_waitForAnswer!.isCompleted) {
+        _waitForAnswer!.complete();
+      }
     }
   }
 
@@ -1028,9 +1309,10 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
       text: TextSpan(
         text: text,
         style: TextStyle(
+          fontFamily: 'amiriQuran',
           fontSize: fontSize,
           height: lineHeight,
-          fontWeight: FontWeight.bold,
+          fontWeight: FontWeight.normal,
         ),
       ),
       textAlign: TextAlign.center,
@@ -1045,7 +1327,9 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
     Color bgColor, {
     double? progress,
   }) {
-    final ayahText = (ayahData["text"] ?? "").toString();
+    final ayahText = (ayahData["text"] ?? "")
+        .toString()
+        .replaceFirst(RegExp(r'^\s*۞\s*'), '');
 
     final surahNameAr =
         (ayahData["surah"] ?? ayahData["surah_ar"] ?? ayahData["surahName"] ?? "")
@@ -1060,38 +1344,81 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
         ? ayahData["ayah"] as int
         : int.tryParse("${ayahData["ayah"]}") ?? 0;
 
+    final scrollAyahKey = '$surahNameAr-$ayahNum-${_phase.name}';
+    if (_lastScrolledAyahKey != scrollAyahKey) {
+      _lastScrolledAyahKey = scrollAyahKey;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_ayahScrollController.hasClients) {
+          _ayahScrollController.jumpTo(0);
+        }
+      });
+    }
+
     final String subtitle = _lang == 'ar'
         ? "سورة $surahNameAr - الآية ${convertToArabicNumber(ayahNum)}"
         : "Surah $surahNameForEn - Ayah $ayahNum";
 
-    const double lineHeight = 1.6;
-    const double footerHeight = 36;
+    const double lineHeight = 1.95;
+    const double footerHeight = 58;
 
-    return Card(
-      color: bgColor.withOpacity(0.95),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topRight,
+          end: Alignment.bottomLeft,
+          colors: [
+            bgColor.withOpacity(0.99),
+            Color.lerp(bgColor, Colors.black, 0.16)!.withOpacity(0.99),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(
+          color: const Color(0xFFD4AF37).withOpacity(0.72),
+          width: 1.6,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFFD4AF37).withOpacity(0.24),
+            blurRadius: 22,
+            spreadRadius: 1,
+            offset: const Offset(0, 8),
+          ),
+          BoxShadow(
+            color: Colors.black.withOpacity(0.24),
+            blurRadius: 18,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
       child: Padding(
-        padding: const EdgeInsets.all(10),
+        padding: const EdgeInsets.all(12),
         child: LayoutBuilder(
           builder: (context, constraints) {
             final double maxTextArea =
                 (constraints.maxHeight - footerHeight - 4).clamp(120.0, constraints.maxHeight);
 
-            final double baseFont = (constraints.maxWidth / 11).clamp(22.0, 34.0);
+            const double baseFont = 32.0;
 
-            final double h =
-                _measureHeight(ayahText, constraints.maxWidth, baseFont, lineHeight);
-            final bool isOverflowing = h > maxTextArea;
+            final double h = _measureHeight(
+              ayahText,
+              (constraints.maxWidth - 42).clamp(80.0, constraints.maxWidth),
+              baseFont,
+              lineHeight,
+            );
+            final double usableTextHeight =
+                (maxTextArea - 20).clamp(80.0, maxTextArea);
+            final bool isOverflowing = h > usableTextHeight;
 
             final textWidget = Text(
               ayahText,
               textAlign: TextAlign.center,
               softWrap: true,
               style: TextStyle(
+                fontFamily: 'amiriQuran',
                 fontSize: baseFont,
                 height: lineHeight,
                 color: Colors.white,
-                fontWeight: FontWeight.bold,
+                fontWeight: FontWeight.normal,
               ),
             );
 
@@ -1101,16 +1428,31 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
                   padding: const EdgeInsets.only(bottom: footerHeight + 4),
                   child: SizedBox(
                     height: maxTextArea,
-                    child: isOverflowing
-                        ? Scrollbar(
-                            thumbVisibility: true,
-                            child: SingleChildScrollView(
-                              primary: false, // avoid PrimaryScrollController warnings
+                    child: Container(
+                      margin: const EdgeInsets.all(3),
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                      decoration: BoxDecoration(
+                        gradient: RadialGradient(
+                          colors: [
+                            Colors.white.withOpacity(0.075),
+                            Colors.transparent,
+                          ],
+                          radius: 0.95,
+                        ),
+                        borderRadius: BorderRadius.circular(18),
+                        border: Border.all(
+                          color: const Color(0xFFF1D77A).withOpacity(0.28),
+                        ),
+                      ),
+                      child: isOverflowing
+                          ? SingleChildScrollView(
+                              controller: _ayahScrollController,
+                              primary: false,
                               physics: const BouncingScrollPhysics(),
                               child: textWidget,
-                            ),
-                          )
-                        : Center(child: textWidget),
+                            )
+                          : Center(child: textWidget),
+                    ),
                   ),
                 ),
                 if (isOverflowing)
@@ -1142,64 +1484,112 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Container(
-                        height: footerHeight,
                         decoration: BoxDecoration(
-                          color: Colors.black.withOpacity(0.25),
-                          borderRadius: BorderRadius.only(
-                            topLeft: const Radius.circular(14),
-                            topRight: const Radius.circular(14),
-                            bottomLeft: Radius.circular(progress == null ? 14 : 0),
-                            bottomRight: Radius.circular(progress == null ? 14 : 0),
-                          ),
+                          color: const Color(0xFF184B26).withOpacity(0.96),
+                          borderRadius: BorderRadius.circular(18),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.16),
+                              blurRadius: 8,
+                              offset: const Offset(0, 3),
+                            ),
+                          ],
                         ),
-                        alignment: Alignment.center,
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
-                        child: Directionality(
-                          textDirection: L10nSimple.textDir(_lang),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Flexible(
-                                child: Text(
-                                  subtitle,
-                                  textAlign: TextAlign.center,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    fontSize: 19,
-                                    color: Colors.white70,
-                                    fontWeight: FontWeight.w600,
+                        padding: const EdgeInsets.fromLTRB(14, 10, 14, 8),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Directionality(
+                              textDirection: L10nSimple.textDir(_lang),
+                              child: InkWell(
+                                borderRadius: BorderRadius.circular(14),
+                                onTap: () {
+                                  if (_phase == RoundPhase.answer) return;
+                                  setState(() {
+                                    _showAyahInfo = !_showAyahInfo;
+                                  });
+                                },
+                                child: AnimatedContainer(
+                                  duration: const Duration(milliseconds: 220),
+                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                                  decoration: BoxDecoration(
+                                    color: _showAyahInfo || _phase == RoundPhase.answer
+                                        ? Colors.white.withOpacity(0.08)
+                                        : Colors.transparent,
+                                    borderRadius: BorderRadius.circular(14),
+                                    border: _showAyahInfo || _phase == RoundPhase.answer
+                                        ? null
+                                        : Border.all(color: Colors.white.withOpacity(0.36)),
+                                  ),
+                                  child: Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Icon(
+                                        _showAyahInfo || _phase == RoundPhase.answer
+                                            ? Icons.visibility_off_rounded
+                                            : Icons.visibility_rounded,
+                                        size: 18,
+                                        color: Colors.white70,
+                                      ),
+                                      const SizedBox(width: 7),
+                                      Flexible(
+                                        child: AnimatedSwitcher(
+                                          duration: const Duration(milliseconds: 180),
+                                          child: Text(
+                                            _showAyahInfo || _phase == RoundPhase.answer
+                                                ? subtitle
+                                                : (_lang == 'ar'
+                                                    ? 'اضغط لإظهار اسم السورة والآية'
+                                                    : 'Tap to show surah and ayah'),
+                                            key: ValueKey<bool>(_showAyahInfo || _phase == RoundPhase.answer),
+                                            textAlign: TextAlign.center,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              fontSize: 15,
+                                              color: Color(0xE6FFFFFF),
+                                              fontWeight: FontWeight.w700,
+                                              height: 1.1,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      if (isOverflowing) ...[
+                                        const SizedBox(width: 6),
+                                        const Icon(Icons.swap_vert, size: 16, color: Colors.white70),
+                                      ],
+                                    ],
                                   ),
                                 ),
                               ),
-                              if (isOverflowing) ...[
-                                const SizedBox(width: 6),
-                                const Icon(Icons.swap_vert, size: 18, color: Colors.white70),
-                              ],
-                            ],
-                          ),
+                            ),
+                            const SizedBox(height: 7),
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(999),
+                              child: progress != null
+                                  ? LinearProgressIndicator(
+                                      value: progress.clamp(0.0, 1.0),
+                                      minHeight: 6,
+                                      backgroundColor: Colors.white24,
+                                      valueColor: const AlwaysStoppedAnimation<Color>(
+                                        Color(0xFF81C784),
+                                      ),
+                                    )
+                                  : AnimatedBuilder(
+                                      animation: _answerBarController,
+                                      builder: (context, _) {
+                                        return LinearProgressIndicator(
+                                          value: _answerBarController.value,
+                                          minHeight: 6,
+                                          backgroundColor: Colors.white24,
+                                          valueColor: const AlwaysStoppedAnimation<Color>(
+                                            Color(0xFF81C784),
+                                          ),
+                                        );
+                                      },
+                                    ),
+                            ),
+                          ],
                         ),
-                      ),
-                      ClipRRect(
-                        borderRadius: const BorderRadius.only(
-                          bottomLeft: Radius.circular(14),
-                          bottomRight: Radius.circular(14),
-                        ),
-                        child: progress != null
-                            ? LinearProgressIndicator(
-                                value: progress.clamp(0.0, 1.0),
-                                minHeight: 5,
-                                backgroundColor: Colors.white.withOpacity(0.18),
-                              )
-                            : AnimatedBuilder(
-                                animation: _answerBarController,
-                                builder: (context, _) {
-                                  return LinearProgressIndicator(
-                                    value: _answerBarController.value,
-                                    minHeight: 5,
-                                    backgroundColor: Colors.white.withOpacity(0.18),
-                                  );
-                                },
-                              ),
                       ),
                     ],
                   ),
@@ -1212,22 +1602,388 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    double? qProgress;
-    if (_phase == RoundPhase.question) {
-      final total = widget.delaySeconds * 60;
-      if (total > 0 && _countdown >= 0) {
-        qProgress = 1.0 - (_countdown / total);
+
+  String _reciterDisplayName() {
+    final directName = _lang == 'ar' ? widget.reciterNameAr : widget.reciterNameEn;
+    if (directName.trim().isNotEmpty) return directName.trim();
+
+    // Fallback only if an old caller did not pass the display names.
+    const arNames = <String, String>{
+      'Abu_Bakr_Ash-Shaatree_128kbps': 'أبو بكر الشاطري',
+      'Husary_Muallim_128kbps': 'الحصري (تعليمي)',
+      'Minshawy_Mujawwad_192kbps': 'المنشاوي (مجود)',
+      'Minshawy_Murattal_128kbps': 'المنشاوي (مرتل)',
+      'Ghamadi_40kbps': 'سعد الغامدي',
+      'Saood_ash-Shuraym_128kbps': 'سعود الشريم',
+      'Sahl_Yassin_128kbps': 'سهل ياسين',
+      'Abdul_Basit_Mujawwad_128kbps': 'عبد الباسط (مجود)',
+      'Abdul_Basit_Murattal_64kbps': 'عبد الباسط (مرتل)',
+      'Abdurrahmaan_As-Sudais_192kbps': 'عبد الرحمن السديس',
+      'Hudhaify_64kbps': 'علي الحذيفي',
+      'Ali_Jaber_64kbps': 'علي جابر',
+      'Fares_Abbad_64kbps': 'فارس عباد',
+      'Muhammad_Ayyoub_128kbps': 'محمد أيوب',
+      'Muhammad_Jibreel_64kbps': 'محمد جبريل',
+      'Husary_128kbps': 'محمود خليل الحصري',
+      'Alafasy_128kbps': 'مشاري راشد العفاسي',
+      'MisharyRashidAlafasy_64kbps': 'مشاري راشد العفاسي',
+    };
+    const enNames = <String, String>{
+      'Abu_Bakr_Ash-Shaatree_128kbps': 'Abu Bakr Al-Shatri',
+      'Husary_Muallim_128kbps': 'Al-Husary (Teaching)',
+      'Minshawy_Mujawwad_192kbps': 'Minshawy (Mujawwad)',
+      'Minshawy_Murattal_128kbps': 'Minshawy (Murattal)',
+      'Ghamadi_40kbps': 'Saad Al-Ghamdi',
+      'Saood_ash-Shuraym_128kbps': 'Saood ash-Shuraym',
+      'Sahl_Yassin_128kbps': 'Sahl Yaseen',
+      'Abdul_Basit_Mujawwad_128kbps': 'Abdul Basit (Mujawwad)',
+      'Abdul_Basit_Murattal_64kbps': 'Abdul Basit (Murattal)',
+      'Abdurrahmaan_As-Sudais_192kbps': 'Abdurrahmaan As-Sudais',
+      'Hudhaify_64kbps': 'Ali Al-Hudhaify',
+      'Ali_Jaber_64kbps': 'Ali Jaber',
+      'Fares_Abbad_64kbps': 'Fares Abbad',
+      'Muhammad_Ayyoub_128kbps': 'Muhammad Ayyoub',
+      'Muhammad_Jibreel_64kbps': 'Muhammad Jibreel',
+      'Husary_128kbps': 'Mahmoud Khalil Al-Husary',
+      'Alafasy_128kbps': 'Mishary Rashid Alafasy',
+      'MisharyRashidAlafasy_64kbps': 'Mishary Rashid Alafasy',
+    };
+
+    final map = _lang == 'ar' ? arNames : enNames;
+    return map[widget.reciterKey] ??
+        widget.reciterKey
+            .replaceAll('_128kbps', '')
+            .replaceAll('_192kbps', '')
+            .replaceAll('_64kbps', '')
+            .replaceAll('_40kbps', '')
+            .replaceAll('_', ' ');
+  }
+
+  String _modeTitle() {
+    if (_lang != 'ar') {
+      switch (widget.testMode) {
+        case 'page':
+          return 'Pages test';
+        case 'juz':
+          return 'Juz test';
+        case 'hizb':
+          return 'Hizb test';
+        case 'rub':
+          return 'Rub test';
+        default:
+          return 'Surahs test';
       }
     }
+    switch (widget.testMode) {
+      case 'page':
+        return 'اختبار الصفحات';
+      case 'juz':
+        return 'اختبار الأجزاء';
+      case 'hizb':
+        return 'اختبار الأحزاب';
+      case 'rub':
+        return 'اختبار الأرباع';
+      default:
+        return 'اختبار السور';
+    }
+  }
+
+  String _rangeTitle() {
+    String d(int v) => L10nSimple.digits(_lang, v);
+    if (widget.testMode == 'page') {
+      return _lang == 'ar'
+          ? 'من الصفحة ${d(widget.selectedPageFrom)} إلى ${d(widget.selectedPageTo)}'
+          : 'Pages ${widget.selectedPageFrom} - ${widget.selectedPageTo}';
+    }
+    if (widget.testMode == 'juz') {
+      return _lang == 'ar'
+          ? 'من الجزء ${d(widget.selectedJuzFrom)} إلى ${d(widget.selectedJuzTo)}'
+          : 'Juz ${widget.selectedJuzFrom} - ${widget.selectedJuzTo}';
+    }
+    if (widget.testMode == 'hizb') {
+      return _lang == 'ar'
+          ? 'من الحزب ${d(widget.selectedHizbFrom)} إلى ${d(widget.selectedHizbTo)}'
+          : 'Hizb ${widget.selectedHizbFrom} - ${widget.selectedHizbTo}';
+    }
+    if (widget.testMode == 'rub') {
+      return _lang == 'ar'
+          ? 'من الربع ${d(widget.selectedRubFrom)} إلى ${d(widget.selectedRubTo)}'
+          : 'Rub ${widget.selectedRubFrom} - ${widget.selectedRubTo}';
+    }
+    return _lang == 'ar'
+        ? '${d(widget.selectedSurahs.length)} سورة مختارة'
+        : '${widget.selectedSurahs.length} selected surahs';
+  }
+
+  Widget _progressDots() {
+    final int total = widget.repeatCount <= 0 ? 1 : widget.repeatCount;
+    final int current = _currentIndex <= 0 ? 1 : _currentIndex.clamp(1, total);
+    final double progress = (current / total).clamp(0.0, 1.0);
+
+    return Directionality(
+      textDirection: TextDirection.ltr,
+      child: TweenAnimationBuilder<double>(
+        duration: const Duration(milliseconds: 380),
+        tween: Tween<double>(begin: 0, end: progress),
+        builder: (context, value, _) {
+          return ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: LinearProgressIndicator(
+              minHeight: 10,
+              value: value,
+              backgroundColor: Colors.white.withOpacity(0.25),
+              valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _infoPill({
+    required IconData icon,
+    required String title,
+    required String value,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.16),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withOpacity(0.18)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: Colors.white, size: 18),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              value,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 13,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _preStartCard() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.18),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: Colors.white.withOpacity(0.22)),
+        boxShadow: const [
+          BoxShadow(
+            color: Colors.black12,
+            blurRadius: 14,
+            offset: Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            _lang == 'ar' ? 'استعد للاختبار' : 'Get ready',
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 24,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 14),
+          Wrap(
+            alignment: WrapAlignment.center,
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _infoPill(
+                icon: Icons.menu_book_rounded,
+                title: _lang == 'ar' ? 'النوع' : 'Type',
+                value: _modeTitle(),
+              ),
+              _infoPill(
+                icon: Icons.my_library_books_rounded,
+                title: _lang == 'ar' ? 'النطاق' : 'Range',
+                value: _rangeTitle(),
+              ),
+              _infoPill(
+                icon: Icons.record_voice_over_rounded,
+                title: _lang == 'ar' ? 'القارئ' : 'Reciter',
+                value: _reciterDisplayName(),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _topQuizHeader() {
+    final int totalQuestions = widget.repeatCount <= 0 ? 1 : widget.repeatCount;
+    final int safeIndex = _currentIndex <= 0 ? 1 : _currentIndex.clamp(1, totalQuestions).toInt();
+    final title = _lang == 'ar'
+        ? '${L10nSimple.digits(_lang, safeIndex)} / ${L10nSimple.digits(_lang, totalQuestions)}'
+        : '$safeIndex / $totalQuestions';
+
+    return Column(
+      children: [
+        Text(
+          _modeTitle(),
+          textAlign: TextAlign.center,
+          style: const TextStyle(
+            color: Colors.white70,
+            fontSize: 15,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        const SizedBox(height: 3),
+        Text(
+          title,
+          textAlign: TextAlign.center,
+          style: const TextStyle(
+            fontSize: 32,
+            color: Colors.white,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+        const SizedBox(height: 8),
+        SizedBox(width: 230, child: _progressDots()),
+        const SizedBox(height: 10),
+        Wrap(
+          alignment: WrapAlignment.center,
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            _infoPill(
+              icon: Icons.record_voice_over_rounded,
+              title: _lang == 'ar' ? 'القارئ' : 'Reciter',
+              value: _reciterDisplayName(),
+            ),
+            if (_countdown > 0)
+              _infoPill(
+                icon: _phase == RoundPhase.answer
+                    ? Icons.skip_next_rounded
+                    : Icons.timer_rounded,
+                title: _phase == RoundPhase.answer
+                    ? (_lang == 'ar' ? 'التالي خلال' : 'Next in')
+                    : (_lang == 'ar' ? 'مؤقت السؤال' : 'Question timer'),
+                value: _phase == RoundPhase.answer
+                    ? L10nSimple.digits(_lang, _countdown)
+                    : '${L10nSimple.digits(_lang, (_countdown ~/ 60))}:${L10nSimple.digits(_lang, (_countdown % 60).toString().padLeft(2, '0'))}',
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+
+
+  String _formatCountdownText() {
+    final int seconds = _countdown < 0 ? 0 : _countdown;
+    if (_phase == RoundPhase.answer) {
+      return _lang == 'ar'
+          ? 'التالي خلال ${L10nSimple.digits(_lang, seconds)}'
+          : 'Next in $seconds';
+    }
+
+    final int minutes = seconds ~/ 60;
+    final int remain = seconds % 60;
+    final String mm = _lang == 'ar'
+        ? L10nSimple.digits(_lang, minutes)
+        : minutes.toString().padLeft(2, '0');
+    final String ssRaw = remain.toString().padLeft(2, '0');
+    final String ss = _lang == 'ar'
+        ? L10nSimple.digits(_lang, ssRaw)
+        : ssRaw;
+
+    return '$mm:$ss';
+  }
+
+  Widget _questionTimerPill() {
+    final bool showCountdown = _countdown > 0;
+    final bool isAnswerPhase = _phase == RoundPhase.answer;
+    final int totalQuestions = widget.repeatCount <= 0 ? 1 : widget.repeatCount;
+    final int questionNumber = _currentIndex <= 0
+        ? 1
+        : _currentIndex.clamp(1, totalQuestions).toInt();
+    return SizedBox(
+      height: 54,
+      child: Center(
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 220),
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(isAnswerPhase ? 0.22 : 0.18),
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: Colors.white.withOpacity(0.28)),
+            boxShadow: const [
+              BoxShadow(
+                color: Colors.black12,
+                blurRadius: 10,
+                offset: Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                showCountdown
+                    ? (isAnswerPhase
+                        ? Icons.skip_next_rounded
+                        : Icons.timer_rounded)
+                    : Icons.donut_large_rounded,
+                color: Colors.white,
+                size: 20,
+              ),
+              const SizedBox(width: 7),
+              Text(
+                showCountdown
+                    ? _formatCountdownText()
+                    : (_lang == 'ar'
+                        ? 'السؤال ${convertToArabicNumber(questionNumber)} من ${convertToArabicNumber(totalQuestions)}'
+                        : 'Question $questionNumber of $totalQuestions'),
+                textDirection: showCountdown ? TextDirection.ltr : null,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w900,
+                  height: 1.1,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+
+  @override
+  Widget build(BuildContext context) {
+    // تقدم الأسئلة وليس تقدم الوقت. يظهر أسفل اسم السورة داخل البطاقة.
+    final int totalQuestions = widget.repeatCount <= 0 ? 1 : widget.repeatCount;
+    final int safeQuestionIndex = _currentIndex <= 0
+        ? 1
+        : _currentIndex.clamp(1, totalQuestions).toInt();
+    final double questionProgress = (safeQuestionIndex / totalQuestions).clamp(0.0, 1.0);
 
     Widget? qCard, aCard;
     if (_phase == RoundPhase.question && _questionAyah != null) {
-      qCard = _buildAyahCard(_questionAyah!, Colors.green.shade900, progress: qProgress);
+      qCard = _buildAyahCard(_questionAyah!, const Color(0xFF1B5E20), progress: questionProgress);
     }
     if (_phase == RoundPhase.answer && _currentAnswerAyah != null) {
-      aCard = _buildAyahCard(_currentAnswerAyah!, Colors.blueGrey.shade900);
+      aCard = _buildAyahCard(_currentAnswerAyah!, const Color(0xFF2F3A3F), progress: questionProgress);
     }
 
     final bool nextButtonActive = _playing &&
@@ -1241,7 +1997,11 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
         body: Container(
           decoration: BoxDecoration(
             gradient: LinearGradient(
-              colors: [Colors.green.shade700, Colors.yellow.shade200],
+              colors: [
+                const Color(0xFF2E7D32),
+                const Color(0xFFA5D66A),
+                const Color(0xFFFFF59D),
+              ],
               begin: Alignment.topCenter,
               end: Alignment.bottomCenter,
             ),
@@ -1250,44 +2010,23 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
             top: true,
             bottom: true,
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(14, 6, 14, 10),
+              padding: const EdgeInsets.fromLTRB(14, 8, 14, 10),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  // Logo
-                  Padding(
-                    padding: const EdgeInsets.only(top: 6, bottom: 6),
-                    child: LayoutBuilder(
-                      builder: (context, constraints) {
-                        final w = MediaQuery.of(context).size.width;
-                        final double logoH = (w * 0.24).clamp(100.0, 160.0);
-                        return Image.asset(
-                          'assets/logo.png',
-                          height: logoH,
-                          fit: BoxFit.contain,
-                          errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-                        );
-                      },
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 200),
+                    padding: EdgeInsets.only(top: _quizStarted ? 2 : 8, bottom: _quizStarted ? 3 : 8),
+                    child: Image.asset(
+                      'assets/logo.png',
+                      height: _quizStarted ? 62 : 130,
+                      fit: BoxFit.contain,
+                      errorBuilder: (_, __, ___) => const SizedBox.shrink(),
                     ),
                   ),
-                  // Counter
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text(
-                        _lang == 'ar'
-                            ? "السؤال رقم ${L10nSimple.digits(_lang, _currentIndex)} / ${L10nSimple.digits(_lang, widget.repeatCount)}"
-                            : "Question $_currentIndex / ${widget.repeatCount}",
-                        style: const TextStyle(
-                          fontSize: 22,
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  // Cards
+                  // تم حذف عنوان نوع الاختبار وعدّاد السؤال العلوي وشريطه.
+                  // يظهر المؤقت فقط عند انتظار إجابة المستخدم أو مراجعة الإجابة.
+                  _questionTimerPill(),
                   Expanded(
                     child: LayoutBuilder(
                       builder: (context, constraints) {
@@ -1295,37 +2034,61 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
                         final bool hasQ = qCard != null;
                         final bool hasA = aCard != null;
 
-                        final double qH =
-                            hasQ ? (hasA ? avail * 0.64 : avail * 0.84).clamp(210.0, avail - 80.0) : 0.0;
-                        final double gap = (hasQ && hasA) ? 4.0 : 0.0;
-                        final double aH =
-                            hasA ? (avail - qH - gap).clamp(140.0, avail - 130.0) : 0.0;
+                        if (!_quizStarted) {
+                          return Center(child: _preStartCard());
+                        }
 
-                        return Column(
-                          children: [
-                            if (hasQ)
-                              Padding(
-                                padding: const EdgeInsets.only(bottom: 2),
-                                child: SizedBox(height: qH, child: qCard),
-                              ),
-                            if (hasA) ...[
-                              if (gap > 0) SizedBox(height: gap),
-                              SizedBox(height: aH, child: aCard),
-                            ],
-                          ],
+                        final double minQuestionHeight = min(230.0, avail);
+                        final double qH = hasQ
+                            ? (hasA ? avail * 0.62 : avail)
+                                .clamp(minQuestionHeight, avail)
+                                .toDouble()
+                            : 0.0;
+                        final double gap = (hasQ && hasA) ? 8.0 : 0.0;
+                        final double remainingForAnswer = max(0.0, avail - qH - gap);
+                        final double minAnswerHeight = min(130.0, remainingForAnswer);
+                        final double aH = hasA
+                            ? remainingForAnswer
+                                .clamp(minAnswerHeight, remainingForAnswer)
+                                .toDouble()
+                            : 0.0;
+
+                        return SingleChildScrollView(
+                          padding: EdgeInsets.zero,
+                          child: ConstrainedBox(
+                            constraints: BoxConstraints(minHeight: avail),
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                if (hasQ)
+                                  SizedBox(
+                                    height: qH,
+                                    width: double.infinity,
+                                    child: qCard,
+                                  ),
+                                if (hasA) ...[
+                                  SizedBox(height: gap),
+                                  SizedBox(
+                                    height: aH,
+                                    width: double.infinity,
+                                    child: aCard,
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
                         );
                       },
                     ),
                   ),
-                  const SizedBox(height: 6),
-                  // Controls (no overflow: Wrap with fixed heights)
+                  const SizedBox(height: 8),
                   LayoutBuilder(
                     builder: (context, cons) {
                       final double gap = 12;
                       final double runGap = 10;
                       final double w = cons.maxWidth;
                       final double itemW = (w - gap) / 2;
-                      const double itemH = 64;
+                      const double itemH = 58;
 
                       Widget buildBtn({
                         required Color color,
@@ -1339,19 +2102,22 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
                           child: ElevatedButton.icon(
                             style: ElevatedButton.styleFrom(
                               backgroundColor: color,
+                              disabledBackgroundColor: color.withOpacity(0.38),
+                              elevation: onPressed == null ? 0 : 5,
+                              shadowColor: Colors.black26,
                               shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(26),
+                                borderRadius: BorderRadius.circular(24),
                               ),
-                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
                             ),
-                            icon: Icon(icon, color: Colors.white, size: 26),
+                            icon: Icon(icon, color: Colors.white, size: 23),
                             label: Text(
                               label,
                               overflow: TextOverflow.ellipsis,
                               style: const TextStyle(
                                 color: Colors.white,
                                 fontWeight: FontWeight.bold,
-                                fontSize: 18,
+                                fontSize: 17,
                               ),
                             ),
                             onPressed: onPressed,
@@ -1359,37 +2125,182 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
                         );
                       }
 
-                      return Wrap(
-                        alignment: WrapAlignment.spaceBetween,
-                        spacing: gap,
-                        runSpacing: runGap,
+                      if (!_quizStarted) {
+                        return SizedBox(
+                          width: w,
+                          height: 66,
+                          child: ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.green.shade700,
+                              disabledBackgroundColor: Colors.green.shade300,
+                              elevation: 6,
+                              shadowColor: Colors.black26,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(28),
+                              ),
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                            ),
+                            icon: const Icon(Icons.play_arrow_rounded, color: Colors.white, size: 30),
+                            label: Text(
+                              _lang == 'ar' ? 'ابدأ السؤال' : 'Start question',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 21,
+                              ),
+                            ),
+                            onPressed: _files.isEmpty ? null : _beginQuizFromUserTap,
+                          ),
+                        );
+                      }
+
+                      final bool canShowAnswer = !_paused && _canPressAnswer;
+                      Widget fullBtn({
+                        required Color color,
+                        required IconData icon,
+                        required String label,
+                        required VoidCallback? onPressed,
+                        double height = 60,
+                        double fontSize = 18,
+                      }) {
+                        return SizedBox(
+                          width: w,
+                          height: height,
+                          child: ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: color,
+                              disabledBackgroundColor: color.withOpacity(0.36),
+                              elevation: onPressed == null ? 0 : 5,
+                              shadowColor: Colors.black26,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(24),
+                              ),
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                            ),
+                            icon: Icon(icon, color: Colors.white, size: 24),
+                            label: Text(
+                              label,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: fontSize,
+                              ),
+                            ),
+                            onPressed: onPressed,
+                          ),
+                        );
+                      }
+
+                      return Column(
+                        mainAxisSize: MainAxisSize.min,
                         children: [
-                          buildBtn(
-                            color: Colors.lightBlue,
-                            icon: Icons.play_arrow,
+                          fullBtn(
+                            color: Colors.green.shade800,
+                            icon: Icons.visibility_rounded,
                             label: t('showAnswer'),
-                            onPressed: _paused ? null : (_canPressAnswer ? _playAnswerAyahs : null),
+                            onPressed: canShowAnswer ? _playAnswerAyahs : null,
+                            height: 60,
+                            fontSize: 19,
                           ),
-                          buildBtn(
-                            color: Colors.orangeAccent,
-                            icon: Icons.fast_forward,
-                            label: t('nextQuestion'),
-                            onPressed: nextButtonActive ? _skipToNextRound : null,
+                          SizedBox(height: runGap),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: SizedBox(
+                                  height: itemH,
+                                  child: ElevatedButton.icon(
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: Colors.green.shade700,
+                                      disabledBackgroundColor: Colors.green.shade700.withOpacity(0.36),
+                                      elevation: nextButtonActive ? 5 : 0,
+                                      shadowColor: Colors.black26,
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+                                    ),
+                                    icon: const Icon(Icons.skip_next_rounded, color: Colors.white, size: 24),
+                                    label: Text(
+                                      _lang == 'ar' ? 'التالي' : 'Next',
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 18,
+                                      ),
+                                    ),
+                                    onPressed: nextButtonActive ? _skipToNextRound : null,
+                                  ),
+                                ),
+                              ),
+                              SizedBox(width: gap),
+                              Expanded(
+                                child: SizedBox(
+                                  height: itemH,
+                                  child: ElevatedButton.icon(
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: _paused ? Colors.green.shade700 : Colors.orange.shade700,
+                                      disabledBackgroundColor: Colors.orange.shade700.withOpacity(0.36),
+                                      elevation: 5,
+                                      shadowColor: Colors.black26,
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+                                    ),
+                                    icon: Icon(_paused ? Icons.play_arrow_rounded : Icons.pause_rounded, color: Colors.white, size: 24),
+                                    label: Text(
+                                      _paused ? t('resume') : t('pause'),
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 18,
+                                      ),
+                                    ),
+                                    onPressed: _togglePause,
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
-                          buildBtn(
-                            color: _paused ? Colors.green : Colors.red,
-                            icon: _paused ? Icons.play_arrow : Icons.pause,
-                            label: _paused ? t('resume') : t('pause'),
-                            onPressed: _togglePause,
-                          ),
-                          buildBtn(
-                            color: Colors.purpleAccent,
-                            icon: Icons.refresh,
-                            label: t('newQuiz'),
+                          SizedBox(height: runGap),
+                          fullBtn(
+                            color: Colors.purple.shade500,
+                            icon: Icons.refresh_rounded,
+                            label: _lang == 'ar'
+                                ? 'إنهاء وبدء مسابقة جديدة'
+                                : 'Finish and start a new quiz',
                             onPressed: () async {
+                              final confirmed = await showDialog<bool>(
+                                context: context,
+                                builder: (dialogContext) => AlertDialog(
+                                  title: Text(
+                                    _lang == 'ar'
+                                        ? 'إنهاء المسابقة؟'
+                                        : 'Finish the quiz?',
+                                  ),
+                                  content: Text(
+                                    _lang == 'ar'
+                                        ? 'سيتم إيقاف المسابقة الحالية والعودة إلى الصفحة الرئيسية.'
+                                        : 'The current quiz will stop and return to the home page.',
+                                  ),
+                                  actions: [
+                                    TextButton(
+                                      onPressed: () => Navigator.pop(dialogContext, false),
+                                      child: Text(_lang == 'ar' ? 'إلغاء' : 'Cancel'),
+                                    ),
+                                    FilledButton(
+                                      onPressed: () => Navigator.pop(dialogContext, true),
+                                      child: Text(_lang == 'ar' ? 'إنهاء' : 'Finish'),
+                                    ),
+                                  ],
+                                ),
+                              );
+                              if (confirmed != true || !mounted) return;
+                              await _stopCurrentAudioNow();
                               await _killAllAudioAndInvalidateRound();
                               await _hardStopAndGoHome();
                             },
+                            height: 58,
+                            fontSize: 18,
                           ),
                         ],
                       );
@@ -1403,6 +2314,5 @@ class _PlayPageState extends State<PlayPage> with SingleTickerProviderStateMixin
       ),
     );
   }
+
 }
-
-

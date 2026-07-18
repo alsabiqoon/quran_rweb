@@ -7,7 +7,7 @@ class L10nSimple {
 
   static final Map<String, Map<String, String>> _t = {
     'en': {
-      'appTitle': 'Quran Player',
+      'appTitle': 'Al-Sabiqoon Quran',
       'settings': 'Settings',
       'startQuiz': 'Start',
       'saveSettings': 'Save Settings',
@@ -24,6 +24,7 @@ class L10nSimple {
       'clearAll': 'Clear all',
       'pickSurahs': 'Pick surahs',
       'searchHint': 'Search a surah',
+      'done': 'Done',
 
       'examDurationMinutes': 'Exam duration (minutes)',
       'showAnswer': 'Show Answer',
@@ -42,7 +43,7 @@ class L10nSimple {
 
     },
     'ar': {
-      'appTitle': 'مشغل القرآن',
+      'appTitle': 'السابقون',
       'settings': 'الإعدادات',
       'startQuiz': 'ابدأ',
       'saveSettings': 'حفظ الإعدادات',
@@ -59,6 +60,7 @@ class L10nSimple {
       'clearAll': 'مسح الكل',
       'pickSurahs': 'اختر السور',
       'searchHint': '🔍 ابحث عن سورة',
+      'done': 'تم',
 
       'examDurationMinutes': 'مدة الاختبار (بالدقائق)',
       'showAnswer': 'عرض الإجابة',

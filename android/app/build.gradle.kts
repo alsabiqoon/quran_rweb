@@ -27,7 +27,7 @@ val flutterVersionName: String =
 
 android {
     namespace = "com.alsabiqoon.quran"
-    compileSdk = 35
+    compileSdk = 36
 
     // AGP 8 uses JDK 17
     compileOptions {
@@ -40,8 +40,8 @@ android {
 
     defaultConfig {
         applicationId = "com.alsabiqoon.quran"
-        minSdk = 21
-        targetSdk = 35
+        minSdk = flutter.minSdkVersion
+        targetSdk = 36
 
         // Read from pubspec.yaml (version: x.y.z+CODE) via local.properties
         versionCode = flutterVersionCode
@@ -191,4 +191,3 @@ flutter {
 // flutter {
 //     source = "../.."
 // }
-
